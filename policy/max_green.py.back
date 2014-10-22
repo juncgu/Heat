@@ -1,0 +1,283 @@
+#policy: max_green.py
+
+import signal
+import sys
+import globalValue
+import time
+sys.path.append("../")
+from datacollector import data_collect
+from commit import commit_analysis
+from commit import cpufreq_dvfs
+from commit import ipdu_switch
+from commit import vm_migration
+
+
+def alarm_handler(signum, frame):    #arguments are essential
+    '''
+    Alarm Handler
+    time interval from globalValue.max_green_interval()
+    '''
+    print "Enter alarm handler!"
+    signal.alarm(globalValue.max_green_interval())
+
+
+def max_green_loop():
+    '''
+    This is the main loop of maximum green policy
+    '''
+    #prepare for init alarm
+    signal.signal(signal.SIGALRM, alarm_handler)
+    signal.alarm(10)   
+  #  signal.alarm(globalValue.max_green_interval())   
+     
+    #there is still needs a interrupt interface to stop this while loop 
+    while 1:
+        #step1: data collector
+        dataset = data_collect.DataCollection()
+        print dataset.ipdu['status'][0] 
+
+        #step2: max_green algorithm process
+        if (dataset.outback['mpptStatus'] == 3):   
+            print ">>>Policy:max green: MPPT Status is Absorb ..."
+            # Solar_excess  
+        elif (dataset.outback['mpptStatus'] == 2):        
+            print ">>>Policy:max green: MPPT Status is Bulk ..."
+            # Solar_starve  
+        elif (dataset.outback['mpptStatus'] == 1):
+            print ">>>Policy:max green: MPPT Status is Float ..."
+        elif (dataset.outback['mpptStatus'] == 0):
+            print ">>>Policy:max green: MPPT Status is Silent ..."
+        elif (dataset.outback['mpptStatus'] == 4):
+            print ">>>Policy:max green: MPPT Status is EQ ..."
+        else:
+            print ">>>Policy:max green: MPPT Status is abnormal ..."
+
+        #step3: commit
+
+        signal.pause()
+
+
+def get_solar_budget(dataset):
+    '''
+    When solar_excess, we needs to get the real solar budget
+    '''
+    real_budget = dataset.outback['solarPower']
+    stored_port_status = list(dataset.ipdu['status'])    #record formal port status
+    #test
+    print "stored_port_status", stored_port_status
+    #Step1: get server power and sorted in sequence
+    server_power = []
+    for i in range(globalValue.ipdu_green_port()):
+         server_power.append(dataset.ipdu['power'][i] + dataset.ipdu['power'][i+4]) 
+    print "server_power", server_power
+    sorted_power = sorted(server_power, reverse = True)    # large---small 
+    sorted_server_map = []    # mapping sorted---server
+    server_bitmap = [0 for i in range(len(sorted_power))]    #record if the server has been mapped
+    # get sorted--server mapping relation        
+    for i in range(len(sorted_power)):
+        for j in range(len(server_power)):
+            if ((sorted_power[i] == server_power[j]) and (server_bitmap[j] == 0)) :
+                sorted_server_map.append(j) 
+                server_bitmap[j] = 1
+                break
+    #test
+    print "sorted_server", sorted_power
+    print "mapping...", sorted_server_map 
+
+    #Step2: switch to utility
+    tmp = [1,1,1,1,2,2,2,2]
+#test
+#    ipdu_switch.ipdu_switch_commit(tmp)
+
+    #Step3: get closer to solar budget
+    #test
+#    for i in range(8):
+#        newset.ipdu['power'][i] = 0
+    #test
+    newset = data_collect.DataCollection()
+    for i in range(4):
+        newset.ipdu['power'][i] = 0 
+    
+    for i in range(len(sorted_power)):
+        tmp_opcode = [0,0,0,0,0,0,0,0]
+        tmp_opcode[sorted_server_map[i]] = 2
+        #test
+        print tmp_opcode
+#test
+#        ipdu_switch.ipdu_switch_commit(tmp_opcode)
+        time.sleep(globalValue.solar_budget_sleep_time())
+        '''
+        retrieve newset dataset: newset
+        '''
+#test
+        newset.outback['solarPower'] = 600 
+        newset.ipdu['power'][i] = server_power[sorted_server_map[i]]/2 
+        print "new add green port power", server_power[sorted_server_map[i]]/2       
+
+        green_provide = 0
+        for j in range(globalValue.ipdu_green_port()):    #green power should provide
+            green_provide += newset.ipdu['power'][j]
+        #test
+        print "green_provide", green_provide
+        
+        if newset.outback['solarPower'] < green_provide: 
+            real_budget = newset.outback['solarPower'] 
+            break
+    
+    #Step4: retrieve solar budget
+    retrieve_opcode = [0,0,0,0,0,0,0,0]
+    for i in range(len(stored_port_status)):
+        if stored_port_status[i] == 0:
+            retrieve_opcode[i] = 1
+        elif stored_port_status[i] == 1:
+            retrieve_opcode[i] = 2
+    print "stored_port_status", stored_port_status
+    print "retrieve_opcode", retrieve_opcode
+#test
+#    ipdu_switch.ipdu_switch_commit(retrieve_opcode) 
+    
+    return real_budget
+
+
+
+def solar_excess(dataset):
+    #Step1: get real solar_budget
+    real_solar = get_solar_budget(dataset)
+    
+    #Step2: retrieve key information    
+    # have been done and retrieved in dataset
+    solar_using = 0
+    for i in range(globalValue.ipdu_green_port()):
+        solar_using = dataset.ipdu['power'][i] 
+    solar_over = real_solar - solar_using
+    if solar_over <= 0:    # if solar_excess is an error
+        return 0   
+
+    #Step3: Calculate Policy
+    #  3.1: open green port
+    open_green_list = []
+    close_utility_list = []
+    for i in dataset.domain['greenPool']:    #get green-prefered-server 
+        if (dataset.ipdu['port'][i]['g'][1] == 0 and dataset.ipdu['port'][i]['u'][1] == 1):    # current: utility
+            if solar_over >= dataset.ipdu['power'][dataset.ipdu['port'][i]['u'][0]]:    #switch to pure green
+                solar_over = solar_over - dataset.ipdu['power'][dataset.ipdu['port'][i]['u'][0]]      
+                open_green_list.append(dataset.ipdu['port'][i]['g'][0])    #record the open_green port
+                close_utility_list.append(dataset.ipdu['port'][i]['u'][0])    # record the close_utility port
+            elif solar_over >= dataset.ipdu['power'][dataset.ipdu['port'][i]['u'][0]]/2:    #switch to mix
+                solar_over = solar_over - dataset.ipdu['power'][dataset.ipdu['port'][i]['u'][0]]/2      
+                open_green_list.append(dataset.ipdu['port'][i]['g'][0])    
+        elif (dataset.ipdu['port'][i]['g'][1] == 1 and dataset.ipdu['port'][i]['u'][1] == 1):    # current: mix
+            if solar_over >= dataset.ipdu['power'][dataset.ipdu['port'][i]['u'][0]]:    #switch to pure green
+                solar_over = solar_over - dataset.ipdu['power'][dataset.ipdu['port'][i]['u'][0]]      
+                close_utility_list.append(dataset.ipdu['port'][i]['u'][0])    # record the close_utility port
+        else:    #current: pure green
+            continue 
+
+
+    if solar_over <= 0:
+        return 0
+    #  3.2: Revoke DVFS
+    revoke_dict = {}    #revoke dvfs according to revoke_list
+    for i in dataset.domain['dvfsPool']:
+        dvfs_host = dataset.server['dvfs'][i]
+        if dvfs_host['current'] < dvfs_host['min']:      #  current < min : error
+            continue
+        elif dvfs_host['current'] >= dvfs_host['max']:   #  current >= max: no dvfs
+            continue
+        else:                                            #  min <= current < max
+            cur_scale = dvfs_host['cur_scale'] 
+        for j in range(cur_scale, len(dvfs_host['power'])):    #add dvfs_host's DVFS scale power
+            if solar_over >= dvfs_host['power'][j]:
+                revoke_dict[i] = dvfs_host['scale'][j+1]
+                solar_over = solar_over - dvfs_host['power'][j]
+            else:
+                break
+    
+
+    if solar_over <= 0:
+        return 0
+    #  3.3: VM migration
+    green_list = []
+    utility_list = []
+    mix_list = []
+    migrate_list = []
+    #     classify
+    for i in dataset.domain['vmmigrationPool']:
+        if ((dataset.ipdu['port'][i]['g'][1]==1) and (dataset.ipdu['port'][i]['u'][1]==1)):    #g+u
+            mix_list.append(i)
+        elif ((dataset.ipdu['port'][i]['g'][1]==1) and (dataset.ipdu['port'][i]['u'][1]==0)):    #g         
+            green_list.append(i) 
+        elif ((dataset.ipdu['port'][i]['g'][1]==0) and (dataset.ipdu['port'][i]['u'][1]==1)):    #u
+            utility_list.append(i)
+    #     from u to mix/g
+    for j in utility_list:
+        utility_host = dataset.server['vm'][j]
+        if utility_host['left'] >= utility_host['count']:    #no vm on this host
+            continue
+        else:
+            for k in utility_host['vm']:    
+                if (k['power'] <= solar_over):                        #solar_over > vm power
+                    for n in green_list:                             # select a green host 
+                        if dataset.server['vm'][n]['left'] >= 1:
+                            solar_over = solar_over - k['power']
+                            migrate_list.append({'src':j, 'dest':n, 'vmid':k['id']})
+                            break
+                elif (k['power']/2 <= solar_over):                   #solar_over > vmpower/2
+                    for m in mix_list:
+                        if dataset.server['vm'][m]['left'] >=1:     #select a mix host
+                            solar_over = solar_over - k['power']/2
+                            migrate_list.append({'src':j, 'dest':m, 'vmid':k['id']})
+                            break
+    #     from mix to g
+    for a in mix_list:
+        mix_host = dataset.server['vm'][a]
+        if mix_host['left'] >= mix_host['count']:    # no vm on this host
+            continue
+        else:
+            for b in mix_host['vm']:
+                if(b['power']/2 <= solar_over):
+                    for c in green_list:
+                        if dataset.server['vm'][c]['left'] >= 1:
+                            solar_over = solar_over - b['power']/2
+                            migrate_list.append({'src':a, 'dest':c, 'vmid':b['id']})
+                            break
+    #prepare for return
+    commit_dict = {}
+    commit_dict['open_port'] = open_green_list    #[0,1,2,3]
+    commit_dict['close_port'] = close_utility_list    #[4,5,6,7]
+    commit_dict['revoke_dvfs'] = revoke_dict    #{'compute1':new_freq, 'compute2':new_freq}
+    commit_dict['vm_migration'] = migrate_list    #[{'src':'compute1', 'dest':'compute2', 'vmid':id}] 
+    return commit_dict
+
+
+
+def solar_starve(dataset):
+    '''
+    when solar is not enough, compared with the using solar power
+    '''
+    #Step1: retrieve key information    
+    # have been done and retrieved in dataset  
+    solar_using = 0
+    for i in range(globalValue.ipdu_green_port()):
+        solar_using = dataset.ipdu['power'][i] 
+    solar_lack = solar_using - dataset.outback['solarPower']
+    if solar_lack <= 0:    # if solar_starve is an error
+        return 0    
+
+    #Step2: 
+
+
+
+
+def loop_test():
+    print globalValue.max_green_interval
+    signal.signal(signal.SIGALRM, alarm_handler)
+    signal.alarm(globalValue.max_green_interval)
+    print "Start..."
+    while 1:
+        print "IN WHILE LOOP"
+        signal.pause()
+
+
+if __name__ == "__main__":
+    max_green_loop()
