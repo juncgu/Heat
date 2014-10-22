@@ -4,3 +4,4 @@
 09/05/2014    commit/commit_analysis.py  ipdu_close_analysis, avoid_shutdown  eliminate the deadlock of 'Shutdown Risk...'. If come up with no port status for more than 2 times, then abort the close operation of that port.
 undo 09/08/2014  policy/max_green.py  solar_starve: close green port. The first part has no judgement of match, which results in close all green energy of non-greenpool server. Now, I should change the details of this policy. The difference of matching should be viewed when close ports are added.
 10/13/2014    HMI_MONITOR          add "ROI" and "economic benefit" into HMI_MONITOR cmd line.
+10/22/2014    datacollector        check the robustness of the file
