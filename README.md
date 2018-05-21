@@ -3,6 +3,7 @@ Heat
 
 Renewable Power (solar) Management for cluster @ IDEAL from ECE-UF
 
+
 It has four components:
 1. top_selector.py  / top_selector2.py   
     It collects all other components, and provides the top-layer mechanism for policy-selection.
